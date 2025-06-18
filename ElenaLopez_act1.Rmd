@@ -1,0 +1,368 @@
+---
+title: "Algoritmos e IA Actividad 1"
+author: "Elena López Martínez"
+date: "2025-04-10"
+output: 
+  html_document: 
+    toc: true
+    fig_caption: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Carga de librerías
+
+Usaremos diversas librerías:
+
+-   para graficar en 2D, uso ggplot2.
+
+-   para graficar en 3D de forma interactiva, uso plotly.
+
+-   para unir los gráficos generados en un solo archivo, uso patchwork.
+
+Para el análisis de reducción de dimensionalidad, uso stats (PCA y MDS), RDRToolbox (ISOMAP y LLE), Rdimtools (LE), ica (ICA), uwot (UMAP) y Rtsne (tSNE). Explicaré cada parámetro escogido en la sección correspondiente.
+
+```{r librerias, results='hide'}
+# librerias para gráficos
+library(ggplot2)
+library(plotly)
+library(patchwork)
+# librerías para análisis de reducción de dimensionalidad
+library(stats)
+library(RDRToolbox)
+library(Rdimtools)
+library(Rtsne)
+library(uwot)
+library(ica)
+```
+
+## Carga y transformación de los datos
+
+Primero cargamos los datos y colocamos los nombres de los genes incluidos en el archivo 'column_names.txt' como nombres de columnas, y crearemos con los datos dos objetos: un dataframe llamado data y una matriz llamada data.matriz, puesto que algunas funciones de reducción de dimensionalidad requieren la entrada de datos en forma de dataframe y otras en forma de matriz.
+
+```{r loading data}
+set.seed(1234)
+
+setwd("/Users/elena/Library/Mobile Documents/com~apple~CloudDocs/UNIR/algoritmos_ia/actividades/act1/Material complementario")
+data.expression <-read.csv('gene_expression.csv',header= FALSE, sep =";")
+etiquetas <- read.csv('classes.csv', header = FALSE, sep = ";")
+genes <- read.csv('column_names.txt', header = FALSE)
+
+data <- data.frame(data.expression)
+data.matriz <-sapply(data.expression, as.numeric)
+colnames(data) <- t(genes)
+colnames(data.matriz)<-t(genes)
+
+```
+
+Además analizamos los datos para ver si tenemos valores no aplicables (NA) y la distribución de los valores 0 en caso de que los haya.
+
+```{r NA}
+anyNA(data)
+na_counts <- colSums((is.na(data)))
+
+any(data == 0)
+zero_counts <- colSums(data == 0)
+
+zero_df <- data.frame(
+  Variable = names(zero_counts),
+  Zeros = as.numeric(zero_counts)
+)
+ggplot(zero_df, aes(x = Variable, y = Zeros, fill = Variable)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Cantidad de ceros por columna",
+       x = "Variable",
+       y = "Número de ceros") +
+  theme_minimal() +
+  theme(legend.position = "none") 
+```
+
+Como vemos, no tenemos valores NA, lo cual nos permite seguir adelante sin más cambios, ya que esos valores NA podrían dar problemas en los análisis posteriores. En cuanto a los valores 0, vemos que hay bastantes columnas que los tienen según el gráfico de su distribución a lo alrgo del dataframe, pero los mantendremos puesto que no interfieren en el análisis numérico posterior. Con esto concluye el procesamiento de los datos y la resolución de errores que pudieran traer consigo.
+
+Ahora pasamos a analizar los datos usando diferentes algoritmos de reducción de dimensionalidad. En todos los casos he graficado en un scatter plot en 2D las 2 primeras componentes o dimensiones, pero para compararlos, al final del script produzco un gráfico en el que se ven todas las gráficas 2D juntas para poder comentarlas mejor. Además, en algunos algoritmos en los que es posible escoger el número de dimensiones a las que queremos reducir los datos también he elaborado gráficos interactivos en 3D, ya que en algunos casos los grupos de datos se ven juntos en 2 dimensiones, pero claramente separados en 3 dimensiones.
+
+## PCA
+
+El análisis de componentes principales se ha escogido como técnica de reducción de la dimensionalidad debido a que es una de las más utilizadas en el caso de variables que son lineales entre sí. Además es una ténica rápida que no demanda mucho coste computacional. Permite eliminar correlaciones entre variables, dejando el conjunto de datos más limpio y mejorando la independencia de las variables finales.
+
+Primero hay que estandarizar los datos usando center = TRUE y también pueden escalarse usando scale = TRUE. Sin embargo, ya que tengo ceros en el dataframe no usaré el escalado, sólo el centrado de los datos. Utilizaremos la varianza que nos arroja el PCA para conocer el peso que tiene cada componente, siendo el más importante el que explica el 15% de la varianza como vemos en el Scree Plot.
+
+```{r PCA}
+# Principal Component Analysis: ----
+pca.results <- prcomp(data, center = TRUE, scale = FALSE)
+varianza.pca <- pca.results$sdev^2
+varianza.pca.porcentaje <- varianza.pca/sum(varianza.pca)*100
+pca.df <- data.frame(pca.results$x)
+
+# con un scree plot podemos ver el porcentaje de varianza que explica cada componente, pero elegimos los 10 primeros
+barplot(varianza.pca.porcentaje[1:10], main= "Scree Plot PCA", xlab="PC", ylab="Porcentaje de variación")
+
+# graficamos PCA
+pca_plot <- ggplot(pca.df, aes(x=PC1, y=PC2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='PCA - Tipos de cáncer', x=paste('PC1', round(varianza.pca.porcentaje[1]), '%'), y=paste('PC2', round(varianza.pca.porcentaje[2]), '%'), color='Grupo') +
+  theme_light()
+print(pca_plot)
+```
+
+Como podemos ver en el gráfico de PCA, un grupo está claramente separado del resto, aquellos pacientes etiquetados como AGH, que aunque tiene algunos valores atípicos cerca del resto de grupos, la mayoría se mantiene con una varianza mayor que el resto en el eje del componente principal 1.
+
+## MDS
+
+Esta técnica analiza la distancia de los datos en un espacio multidimensional. En este caso, como tenemos datos cuantitativos, usaremos PCoA, o Principal Coordinate Analysis, una implementación lineal del MDS. Se pueden usar diferentes distancias, yo he elegido comparar tres de ellas: la euclidiana, la manhattan y la minkowski, y así ver las posibles diferencias entre ellas. Los argumentos que pasamos a la función cmdscale son el tipo de disntancia, el máximo de dimensiones en el espacio en el que representaremos los datos (k) y si queremos los autovalores de vuelta (eig = TRUE)
+
+```{r MDS euclidean}
+# Multidimensional Scaling: EUCLIDEAN----
+dist.euclidean <-dist(data, method = "euclidean")
+mds.euclidean.results <- cmdscale(dist.euclidean, k=2, eig=TRUE)
+mds.euclidean.df <- data.frame(mds.euclidean.results$points)
+varianza.mds.euclidean <- (mds.euclidean.results$eig/sum(mds.euclidean.results$eig))*100
+## graficamos -MDS Euclidean---
+mds_euc_plot <- ggplot(mds.euclidean.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='MDS euclidean- Tipos de cáncer', x=paste('Dim 1', round(varianza.mds.euclidean[1]), '%'), y=paste('Dim 2', round(varianza.mds.euclidean[2]), '%'), color='Grupo') +
+  theme_light()
+```
+
+```{r MDS manhattan}
+# Multidimensional Scaling: MANHATTAN----
+dist.manhattan <-dist(data, method = "manhattan") # probamos otra distancia, manhattan
+mds.manhattan.results <- cmdscale(dist.manhattan, k=2, eig=TRUE)
+mds.manhattan.df <- data.frame(mds.manhattan.results$points)
+varianza.mds.manhattan <- (mds.manhattan.results$eig/sum(mds.manhattan.results$eig))*100
+# graficamos -MDS Manhattan---
+mds_man_plot <- ggplot(mds.manhattan.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='MDS manhattan- Tipos de cáncer', x=paste('Dim 1', round(varianza.mds.manhattan[1]), '%'), y=paste('Dim 2', round(varianza.mds.manhattan[2]), '%'), color='Grupo') +
+  theme_light()
+```
+
+```{r MDS minkowski}
+# Multidimensional Scaling: minkowski----
+dist.minkowski <-dist(data, method = "minkowski") # probamos otra distancia, minkowski
+mds.minkowski.results <- cmdscale(dist.minkowski, k=2, eig=TRUE)
+mds.minkowski.df <- data.frame(mds.minkowski.results$points)
+varianza.mds.minkowski <- (mds.minkowski.results$eig/sum(mds.minkowski.results$eig))*100
+# graficamos -MDS minkowski---
+mds_min_plot <- ggplot(mds.minkowski.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='MDS minkowski- Tipos de cáncer', x=paste('Dim 1', round(varianza.mds.minkowski[1]), '%'), y=paste('Dim 2', round(varianza.mds.minkowski[2]), '%'), color='Grupo') +
+  theme_light()
+```
+
+```{r MDS plots, fig.height=6, fig.width=12}
+mds_plots <- wrap_plots(mds_euc_plot, mds_man_plot, mds_min_plot)
+print(mds_plots)
+```
+
+Los gráficos comparados de los tipos de distancia nos indican lo mismo que vimos en el análisis del PCA, por lo que podemos concluir que ambos métodos, PCA y MDS, son muy parecidos en su tratamiento de los datos y llevan a las mismas conclusiones: el grupo AGH está separado de los demás grupos. Por lo demás, el uso de una distancia u otra cambia las magnitudes de los ejes y el sentido (positivo o negativo), pero no la forma de agruparlos. Por lo que se observa, la distancia euclidiana y la de minkowski son exactamente iguales en sus resultados, siendo la distancia de manhattan la más diferente.
+
+## ISOMAP
+
+ISOMAP es una técnica de distancias, como MDS, pero usa la distancia geodésica. Es un algoritmo eficaz con las variables no lineales, pero es difícil dar con el parámetro k, el número de vecinos, para optimizar el análisis del algoritmo. Probando con algunos valores he acabado utilizando 5. Sí que podemos conocer cual es el número de dimensiones más óptimo utlizando el argumento plotResiduals=TRUE, que nos enseña un gráfico de las varianzas residuales en función del número de dimensiones que usemos. Siguiendo la 'regla del codo' vemos que reducir los datos a 4 dimensiones es suficiente para tener bajas varianzas residuales.
+
+```{r ISOMAP}
+# Isomap: ----
+isomap.results <- Isomap(data=data.matriz, dims=1:10, k=5, plotResiduals = TRUE)
+isomap.df <-data.frame(isomap.results$dim4)
+# graficamos ISOMAP
+isomap_plot <- ggplot(isomap.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='ISOMAP - Tipos de cáncer', x=paste('Dim 1'), y=paste('Dim 2'), color='Grupo') +
+  theme_light()
+print(isomap_plot)
+```
+
+Como vemos en el gráfico del ISOMAP, podemos diferenciar claramente el grupo AGH y también el HPB. Para ver si el resto de grupos también están separados, añadimos un eje más, el eje z, para trazar un gráfico en 3D:
+
+```{r ISOMAP 3D}
+plot_ly(data = isomap.df,
+        x = ~X1,
+        y = ~X2,
+        z = ~X3,
+        color = ~etiquetas$V2,
+        type = "scatter3d",
+        mode = "markers",
+        marker = list(size = 5),
+        hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = "Dimensión 1"),
+                      yaxis = list(title = "Dimensión 2"),
+                      zaxis = list(title = "Dimensión 3"),
+                      title = "ISOMAP - Tipos de cáncer (3D Interactivo)"))
+```
+
+Gracias al gráfico 3D podemos ver que las muestras etiquetadas como CGC también se encuentran algo separadas de las demás, por lo que visualizar estos datos en 3 dimensiones nos ayuda a clarificar mejor si los algoritmos consiguen separar los grupos o no.
+
+## tSNE
+
+tSNE es una técnica con componente estocástico (por ello sembramos el seed 1234 en el apartado de carga y transformación de los datos) muy útil para dataframes con alta dimensionalidad. Es muy eficiente en el análisis de variables no lineales e identifica bien la estructura de los datos. Además es mejor que el algoritmo SNE porque evita el problema del hacinamiento de los datos al bajar el número de dimensiones. Por otro lado, el componente estocástico que tiene afecta a su reproducibilidad.
+
+```{r tSNE}
+tsne.results <-Rtsne(data)
+tsne.df <- data.frame(tsne.results$Y)
+# graficamos tSNE
+tsne_plot <- ggplot(tsne.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='t-SNE - Tipos de cáncer', x=paste('Dim 1'), y=paste('Dim 2'), color='Grupo') +
+  theme_light()
+print(tsne_plot)
+```
+
+Vemos que hasta ahora, tSNE parece el mejor algoritmo en la separación de los datos etiquetados, teniendo solo un par de valores atípicos etiquetados como CGC que aparecen cerca del HPB y de CFB. Por otro lado, también podemos ver dos subgrupos de CFB, cosa que no hemos visto con ninguno de los análisis anteriores.
+
+## LLE
+
+LLE es eficiente preservando las relaciones más locales entre los puntos, pero es difícil dar con el número de vecinos óptimo (k). Probando, he escogido 125, ya que me daba los resultados que mejor me parecían. También escojo 3 dimensiones porque graficaré los resultados en 2D y en 3D.
+
+```{r LLE}
+# Locally Linear Embedding LLE: ----
+lle.results <-LLE(data.matriz, dim= 3,  k=125)
+lle.df <- data.frame(lle.results)
+# graficamos LLE
+lle_plot <- ggplot(lle.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='LLE k=125 - Tipos de cáncer', x=paste('Dim1'), y=paste('Dim 2'), color='Grupo') +
+  theme_light()
+print(lle_plot)
+```
+
+En el gráfico volvemos a observar el grupo AGH más separado, pero esta vez también vemos al CHC por primera vez en una zona diferente a los demás. Ahora el gráfico en 3D puede arrojar más luz:
+
+```{r LLE 3D}
+plot_ly(data = lle.df,
+        x = ~X1,
+        y = ~X2,
+        z = ~X3,
+        color = ~etiquetas$V2,
+        type = "scatter3d",
+        mode = "markers",
+        marker = list(size = 5),
+        hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = "Dimensión 1"),
+                      yaxis = list(title = "Dimensión 2"),
+                      zaxis = list(title = "Dimensión 3"),
+                      title = "LLE - Tipos de cáncer (3D Interactivo)"))
+```
+
+Efectivamente, podemos ver que se diferencian claramente tres grupos: HPB, CHC y AGH. De nuevo, tener una dimensión más clarifica la distribución de los puntos y nos permite ver que los que parecían juntos, no lo están en el eje Z.
+
+## LE
+
+LE es una técnica de spectral embedding (como ISOMAP) que permite analizar variables de manera no lineal utilizando autovalores. AL contrario que ISOMAP no preserva la geometría global, sino la local, por lo que tiene similitudes con LLE. Es eficiente para vecindarios dispersos y al preservar la localidad resiste bien a la influencia de los valores atípicos. Se puede escoger el grafo de construcción del vecindario (knn) y el número de vecinos (150), y también se puede escoger si queremos las relaciones de los grafos con pesos o sin ellos (dicotomía 1 o 0 si dos puntos están unidos o no)
+
+```{r LE}
+# LE: ----
+le.results <-do.lapeig(data.matriz, ndim = 3, type=c('knn', 150), weighted = FALSE)
+le.df <- data.frame(le.results$Y)
+
+le_plot <- ggplot(le.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='LE - Tipos de cáncer', x=paste('Dim 1'), y=paste('Dim 2'), color='Grupo') +
+  theme_light()
+print(le_plot)
+```
+
+En el gráfico se observa claramente el aislamiento de las muestras AGH, pero también las CHC. Ahora veamoslo en 3D:
+
+```{r LE 3D}
+plot_ly(data = le.df,
+        x = ~X1,
+        y = ~X2,
+        z = ~X3,
+        color = ~etiquetas$V2,
+        type = "scatter3d",
+        mode = "markers",
+        marker = list(size = 5),
+        hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = "Dimensión 1"),
+                      yaxis = list(title = "Dimensión 2"),
+                      zaxis = list(title = "Dimensión 3"),
+                      title = "LE - Tipos de cáncer (3D Interactivo)"))
+
+```
+
+En este gráfico de LE 3D se diferencian todos los grupos menos CGC, que solapa con algunos puntos de los demás, especialmente HPB.
+
+## UMAP
+
+Esta técnica asume que los puntos están distribuidos uniformemente por un espacio topológico. También tiene un componente estocástico, y muchos parámetros que se pueden cambiar. Usaremos los siguientes: n_neighbours indica el tamaño del vecindario local, así que usaremos como tamaño el 20% de las muestras que tenemos. N-components es el número de dimensiones que vamos a usar, min_dist es la distancia mínima entre puntos anidados, local_connectivity es el número de vecinos cercanos que se asumen como conectados a nivel local.
+
+```{r UMAP}
+# UMAP: ----
+umap.results <-umap(data.matriz, n_neighbors=0.2 * nrow(data),
+                    n_components = 3, min_dist = 0.1, local_connectivity=1, ret_model = TRUE, verbose = TRUE)
+umap.df <- data.frame(umap.results$embedding)
+
+umap_plot <- ggplot(umap.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='UMAP - Tipos de cáncer', x=paste('Dim 1'), y=paste('Dim 2'), color='Grupo') +
+  theme_light()
+print(umap_plot)
+```
+
+Vemos que UMAP separa muy bien todos los grupos, con algunos valores de SGS y HPB cambiados entre sí. Puede ser que estos pacientes estén mal etiquetados. También veremos el gráfico en 3D, aunque en este algoritmo no es necesario puesto que 2 dimensiones son suficientes para representar las diferencias entre grupos de manera satisfactoria:
+
+```{r UMAP 3D}
+plot_ly(data = umap.df,
+        x = ~X1,
+        y = ~X2,
+        z = ~X3,
+        color = ~etiquetas$V2,
+        type = "scatter3d",
+        mode = "markers",
+        marker = list(size = 5),
+        hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = "Dimensión 1"),
+                      yaxis = list(title = "Dimensión 2"),
+                      zaxis = list(title = "Dimensión 3"),
+                      title = "UMAP - Tipos de cáncer (3D Interactivo)"))
+```
+
+## ICA
+
+ICA se usa para reducir el ruido de un conjunto de datos. Extrae señales estadísticamente diferentes entre mexclas de señales, y considera que esas diferencias estadísticas se deben a que las señales tienen orígenes distintos. También tiene un componente estocástico y es difícil de establecer sus parámetros óptimos.
+
+```{r ICA}
+ica.results <-ica(data.matriz, nc=3, method = "jade")
+ica.df <- data.frame(ica.results$S)
+
+ica_plot <- ggplot(ica.df, aes(x=X1, y=X2, color=etiquetas$V2)) +
+  geom_point(size=3, alpha = 0.3) +
+  labs(title='ICA Jade - Tipos de cáncer', x=paste('Dim 1'), y=paste('Dim 2'), color='Grupo') +
+  theme_light()
+print(ica_plot)
+```
+
+El gráfico en 2D nos enseña la separación entre CHC y AGH de todos los demás grupos, pero podemos ver si el gráfico en 3 dimensiones arroja más luz.
+
+```{r ICA 3D}
+
+plot_ly(data = ica.df,
+        x = ~X1,
+        y = ~X2,
+        z = ~X3,
+        color = ~etiquetas$V2,
+        type = "scatter3d",
+        mode = "markers",
+        marker = list(size = 5),
+        hoverinfo = "text") %>%
+  layout(scene = list(xaxis = list(title = "Dimensión 1"),
+                      yaxis = list(title = "Dimensión 2"),
+                      zaxis = list(title = "Dimensión 3"),
+                      title = "ICA - Tipos de cáncer (3D Interactivo)"))
+```
+
+Efectivamente, los 5 grupos aparecen más separados cuando añadimos el eje Z a la representación.
+
+Por último, veremos todos los gráficos 2D juntos para sacar conclusiones.
+
+```{r PLOT final, fig.height=12, fig.width=12}
+plot_genes_final <- wrap_plots(pca_plot,mds_euc_plot,mds_man_plot,mds_min_plot,isomap_plot, tsne_plot, lle_plot, le_plot, umap_plot, ica_plot)
+print(plot_genes_final)
+```
+
+Podemos establecer que UMAP y tSNE son las mejores opciones para separar los grupos y que incluso podemos identificar muestras que parecen mal etiquetadas. Sin embargo, el resto de técnicas se muestran útiles si se aplica una visualización de los datos en 3 dimensiones. En cuanto al sentido biológico de los análisis, podemos interpretar que en general los pacientes etiquetados como AGH tienen un perfil más identitario de expresión génica, mientras que otros pacientes, por ejemplo aquellos etiquetados como CGC y CFB, tienen perfiles de expresión génica más similares entre sí, lo que hace más complicado separarlos en grupos independientes.
